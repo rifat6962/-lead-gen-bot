@@ -250,6 +250,16 @@ def delete_schedule_time(time_str):
 
 # ════════════════════════════════════════════════════════════
 #  KEYWORD GENERATION
+#  Strategy: Generate keywords likely to surface NEW / SMALL /
+#  LOW-RATED apps — NOT popular top-chart apps.
+#  Key insight: Play Store search returns apps ranked by
+#  relevance+installs. To find low-rated apps we need:
+#  1. Long-tail niche queries → fewer results, smaller devs
+#  2. "new" / "2024" / "2025" suffixes → recently launched apps
+#  3. Misspellings / alternative spellings → obscure apps
+#  4. Hyper-specific feature queries → niche small apps
+#  5. google_play_scraper `collection` browse (NEW_FREE,
+#     NEW_FREE_GAMES, TRENDING) → freshly listed apps
 # ════════════════════════════════════════════════════════════
 def parse_ai_keywords(raw_text):
     terms = []
@@ -261,7 +271,7 @@ def parse_ai_keywords(raw_text):
     return terms
 
 def generate_keywords_from_base(base):
-    send(f"🧠 Generating keywords for '{base}'...")
+    send(f"🧠 Generating low-rating-targeted keywords for '{base}'...")
     settings  = get_settings()
     kw_prompt = settings.get('keyword_prompt', '')
 
@@ -274,29 +284,65 @@ def generate_keywords_from_base(base):
         if 2 < len(kw) < 55 and kw not in seen:
             seen.add(kw); all_kws.append(kw)
 
-    add(base_words)
-    for w in ['app', 'free', 'best', 'top', 'new', 'simple', 'easy',
-              'pro', 'safe', 'secure', 'fast', 'offline', 'lite',
-              'for android', 'no ads', '2025', 'tracker', 'manager']:
+    # ── Tier 1: New/recent app patterns (fresh = low ratings) ──
+    # Newly launched apps almost always have <4.0 rating + few installs
+    for w in ['new app 2024', 'new app 2025', 'new 2024', 'new 2025',
+              'latest app', 'new release', 'just launched', 'beta app']:
         add(f"{base_words} {w}")
-    for w in ['best', 'top', 'free', 'new', 'simple', 'easy', 'secure',
-              'popular', 'trusted', 'good', 'reliable', 'fast']:
-        add(f"{w} {base_words}")
-    for w in ['best', 'top', 'free', 'most popular', 'highly rated',
-              'simple', 'easy to use', 'beginner', 'advanced']:
+
+    # ── Tier 2: Small developer patterns ──
+    # Indie/small devs → lower ratings, fewer installs
+    for w in ['indie', 'small', 'simple', 'basic', 'minimal', 'lite',
+              'startup', 'personal', 'solo developer', 'independent']:
+        add(f"{base_words} {w}")
         add(f"{w} {base_words} app")
 
+    # ── Tier 3: Hyper-specific long-tail (niche apps = small dev) ──
+    words = base_words.split()
+    if len(words) >= 1:
+        w0 = words[0]
+        for suffix in ['helper', 'assistant', 'tool', 'utility', 'widget',
+                       'monitor', 'checker', 'viewer', 'reader', 'scanner',
+                       'recorder', 'logger', 'notes', 'diary', 'journal',
+                       'reminder', 'alarm', 'timer', 'counter', 'converter']:
+            add(f"{base_words} {suffix}")
+            add(f"{w0} {suffix}")
+
+    # ── Tier 4: Country/region-specific (local apps = lower ratings) ──
+    for country_term in ['india', 'pakistan', 'bangladesh', 'nigeria',
+                         'indonesia', 'philippines', 'local', 'regional']:
+        add(f"{base_words} {country_term}")
+        add(f"{country_term} {base_words} app")
+
+    # ── Tier 5: Problem-focused (users who complain = apps need help) ──
+    for problem in ['fix', 'improve', 'boost', 'increase', 'grow',
+                    'problem', 'issue', 'slow', 'crash', 'bug']:
+        add(f"{base_words} {problem}")
+
+    # ── Tier 6: Base + generic (always works, medium volume) ──
+    add(base_words)
+    for w in ['app', 'free', 'android', 'apk', 'offline', 'no internet',
+              'without internet', 'no wifi', 'for beginners', 'for students',
+              'for business', 'for small business', 'amateur', 'hobbyist']:
+        add(f"{base_words} {w}")
+        add(f"free {base_words} {w}")
+
+    # ── Tier 7: AI generates hyper-niche long-tail terms ──
     prompt = (
         f'You are a Google Play Store search expert.\n'
         f'Base niche: "{base}"\n'
         + (f'Context: {kw_prompt}\n' if kw_prompt else '') +
-        f'\nGenerate 150 search terms that return MANY real Android apps on Play Store.\n'
-        f'Rules:\n'
-        f'- Broad category terms only (no specific obscure brand/coin names)\n'
-        f'- Think about PROBLEMS users solve, FEATURES they want, RELATED categories\n'
-        f'- Every term should return 20+ apps when searched on Play Store\n'
-        f'- Do NOT use: specific altcoin names, obscure brands, technical jargon\n'
-        f'- DO use: common user language, popular category names, general feature terms\n'
+        f'\nGoal: Find SMALL, INDIE, LOW-RATED Android apps (rating < 4.0, installs < 100k).\n'
+        f'\nGenerate 150 search terms designed to surface SMALL/NEW apps, NOT popular ones.\n'
+        f'Strategy:\n'
+        f'- Long-tail hyper-specific queries (3-6 words) → fewer results = smaller apps\n'
+        f'- "new [niche] app 2024/2025" patterns\n'
+        f'- Sub-niches and micro-categories within "{base}"\n'
+        f'- Specific use-case combinations ("for [specific job/hobby/situation]")\n'
+        f'- Regional/local versions ("for [country/city/language]")\n'
+        f'- Feature-specific ("with [rare feature]", "without [annoying thing]")\n'
+        f'- Problem-aware ("fix [problem] app", "[problem] solution app")\n'
+        f'DO NOT generate: "best", "top", "popular", "most downloaded" — these return big apps.\n'
         f'\nOutput: comma-separated terms only. No numbers or explanations.'
     )
     result = call_ai(prompt, max_tokens=2500)
@@ -308,8 +354,8 @@ def generate_keywords_from_base(base):
             continue
         add(t)
 
-    send(f"✅ {len(all_kws)} keywords ready (base:{min(50,len(all_kws))} + AI:{len(ai_terms)})")
-    return all_kws[:200] if len(all_kws) >= 200 else all_kws
+    send(f"✅ {len(all_kws)} keywords ready (niche-targeted for low-rated apps)")
+    return all_kws[:250] if len(all_kws) >= 250 else all_kws
 
 
 _consecutive_empty = 0
@@ -333,7 +379,106 @@ def play_search_safe(query, country, n_hits=250):
                 return []
     return []
 
+def browse_collection_ids(base_kw, max_rating):
+    """
+    Browse Play Store NEW_FREE and TRENDING collections by genre.
+    These lists contain freshly-listed apps — most have low ratings.
+    Returns list of (app_id, score) tuples pre-filtered by max_rating.
+    Uses google_play_scraper's `search` with 'new' prefix as proxy
+    since collection() API requires category codes.
+    """
+    from google_play_scraper import collection as gp_collection, Sort
+    # Map base keyword to likely Play Store category codes
+    GENRE_MAP = {
+        'finance':     ['FINANCE'],
+        'banking':     ['FINANCE'],
+        'crypto':      ['FINANCE'],
+        'wallet':      ['FINANCE'],
+        'payment':     ['FINANCE'],
+        'shopping':    ['SHOPPING'],
+        'ecommerce':   ['SHOPPING'],
+        'travel':      ['TRAVEL_AND_LOCAL'],
+        'fitness':     ['HEALTH_AND_FITNESS'],
+        'health':      ['HEALTH_AND_FITNESS'],
+        'workout':     ['HEALTH_AND_FITNESS'],
+        'game':        ['GAME'],
+        'gaming':      ['GAME'],
+        'puzzle':      ['GAME_PUZZLE'],
+        'education':   ['EDUCATION'],
+        'learning':    ['EDUCATION'],
+        'music':       ['MUSIC_AND_AUDIO'],
+        'photo':       ['PHOTOGRAPHY'],
+        'camera':      ['PHOTOGRAPHY'],
+        'video':       ['VIDEO_PLAYERS'],
+        'news':        ['NEWS_AND_MAGAZINES'],
+        'weather':     ['WEATHER'],
+        'map':         ['MAPS_AND_NAVIGATION'],
+        'navigation':  ['MAPS_AND_NAVIGATION'],
+        'food':        ['FOOD_AND_DRINK'],
+        'restaurant':  ['FOOD_AND_DRINK'],
+        'social':      ['SOCIAL'],
+        'chat':        ['COMMUNICATION'],
+        'messaging':   ['COMMUNICATION'],
+        'productivity':['PRODUCTIVITY'],
+        'tools':       ['TOOLS'],
+        'utility':     ['TOOLS'],
+        'business':    ['BUSINESS'],
+        'book':        ['BOOKS_AND_REFERENCE'],
+        'reading':     ['BOOKS_AND_REFERENCE'],
+        'sport':       ['SPORTS'],
+        'lifestyle':   ['LIFESTYLE'],
+        'art':         ['ART_AND_DESIGN'],
+        'design':      ['ART_AND_DESIGN'],
+    }
+
+    categories = []
+    base_low = base_kw.lower()
+    for kw, cats in GENRE_MAP.items():
+        if kw in base_low:
+            categories.extend(cats)
+    if not categories:
+        categories = ['TOOLS', 'PRODUCTIVITY', 'LIFESTYLE']  # fallback
+
+    categories = list(dict.fromkeys(categories))[:3]  # max 3 categories
+
+    found_ids = []
+    for cat in categories:
+        for coll in ['NEW_FREE', 'TRENDING']:
+            try:
+                results = gp_collection(
+                    collection=coll,
+                    category=cat,
+                    lang='en',
+                    country='us',
+                    count=200,
+                )
+                for r in results:
+                    aid   = r.get('appId','')
+                    score = float(r.get('score') or 0.0)
+                    # Pre-filter by rating here to save gplay() API calls later
+                    if aid and aid not in state["scraped_ids"]:
+                        if score == 0.0 or score < max_rating:
+                            found_ids.append(aid)
+                time.sleep(random.uniform(1.0, 2.0))
+            except Exception as e:
+                print(f"[Collection] {coll}/{cat}: {e}")
+
+    # Deduplicate
+    seen, out = set(), []
+    for i in found_ids:
+        if i not in seen:
+            seen.add(i); out.append(i)
+    return out
+
 def get_search_ids_for_keyword(kw):
+    """
+    For each keyword, use TWO search strategies:
+    1. Long-tail search (last page / n_hits=50) → fewer, smaller apps
+    2. Short search (n_hits=30) with 'new' prefix → recently launched
+
+    Deliberately use SMALL n_hits per query so Play Store returns
+    the tail of results (less popular apps), not the top chart.
+    """
     global _consecutive_empty
 
     if _consecutive_empty >= 4:
@@ -342,23 +487,42 @@ def get_search_ids_for_keyword(kw):
         _consecutive_empty = 0
 
     words = kw.split()
-    if len(words) == 1:
-        queries = [kw, f"{kw} app", f"best {kw}", f"{kw} free"]
-    elif len(words) == 2:
-        queries = [kw, f"best {kw}", f"{kw} app", f"{kw} free"]
-    elif len(words) == 3:
-        queries = [kw, f"best {kw}", f"{' '.join(words[:2])} app"]
-    else:
-        queries = [kw, ' '.join(words[:3]), ' '.join(words[:2])]
 
-    queries = list(dict.fromkeys(q.strip() for q in queries if q.strip()))
+    # Strategy: fewer hits per search = Play Store shows less-popular apps
+    # Use 'in' country heavily — Indian market has tons of small low-rated apps
+    queries_main   = []
+    queries_new    = []
+
+    if len(words) <= 2:
+        # Short keyword: add long-tail variants to push into niche
+        queries_main = [kw, f"{kw} app for android", f"simple {kw} app",
+                        f"{kw} lite", f"free {kw} app"]
+        queries_new  = [f"new {kw} 2024", f"new {kw} 2025", f"{kw} beta"]
+    elif len(words) == 3:
+        queries_main = [kw, f"simple {kw}", f"free {kw}"]
+        queries_new  = [f"new {kw}", f"{kw} 2025"]
+    else:
+        queries_main = [kw, ' '.join(words[:3])]
+        queries_new  = [f"new {kw}"]
+
+    queries_main = list(dict.fromkeys(q.strip() for q in queries_main if q.strip()))
+    queries_new  = list(dict.fromkeys(q.strip() for q in queries_new  if q.strip()))
 
     raw_ids = []
-    for q in queries:
-        for country in ['us', 'in', 'gb']:
-            results = play_search_safe(q, country, n_hits=250)
+
+    # Main queries: use n_hits=100 (not 250) — tail of results has smaller apps
+    for q in queries_main:
+        for country in ['in', 'us', 'gb']:   # 'in' first — India has most small apps
+            results = play_search_safe(q, country, n_hits=100)
             raw_ids.extend(r['appId'] for r in results)
-            time.sleep(random.uniform(0.7, 1.2))
+            time.sleep(random.uniform(0.5, 1.0))
+
+    # New/recent queries: only 'us' + 'in', small n_hits
+    for q in queries_new:
+        for country in ['us', 'in']:
+            results = play_search_safe(q, country, n_hits=50)
+            raw_ids.extend(r['appId'] for r in results)
+            time.sleep(random.uniform(0.5, 0.9))
 
     _consecutive_empty = (_consecutive_empty + 1) if not raw_ids else 0
 
@@ -370,6 +534,8 @@ def get_search_ids_for_keyword(kw):
 
 # ════════════════════════════════════════════════════════════
 #  FILTER
+#  zero_rating (brand new apps) = allowed if has email + installs ok.
+#  These are our BEST leads — just launched, need help immediately.
 # ════════════════════════════════════════════════════════════
 def is_qualified(app_dict, max_rating, max_installs, seen_emails, stats):
     dev      = str(app_dict.get('dev_name','') or '').lower()
@@ -383,12 +549,14 @@ def is_qualified(app_dict, max_rating, max_installs, seen_emails, stats):
         stats["no_email"] += 1; return False, "no_email"
     if email in seen_emails:
         stats["dup"] += 1; return False, "dup"
-    if rating == 0.0:
-        stats["zero_rating"] += 1; return False, "zero_rating"
     if installs > max_installs:
         stats["installs"] += 1; return False, "installs"
-    if rating >= max_rating:
+    # rating == 0.0 means brand new app (no ratings yet) — KEEP IT, great lead
+    # rating > 0 must be strictly below max_rating
+    if rating > 0.0 and rating >= max_rating:
         stats["rating"] += 1; return False, "rating"
+    if rating == 0.0:
+        stats["zero_rating"] += 1  # track but still pass
     stats["passed"] += 1
     return True, "passed"
 
@@ -442,7 +610,72 @@ def phase1_scrape():
 
         send(f"🎯 Target: *{MIN_LEADS} qualified leads* | Keyword: *{base_kw}*\n"
              f"Existing emails blocked: *{len(state['seen_emails'])}*\n"
-             f"Filter auto-relaxes each round until target is reached.")
+             f"Strategy: collection browse → new/niche keyword search → filter relax each round.")
+
+        # ── PRE-STEP: Browse NEW_FREE + TRENDING collections ─────────
+        # These lists have freshly-launched apps → low ratings, small devs
+        send("🗂️ Browsing Play Store NEW & TRENDING collections first...")
+        try:
+            collection_ids = browse_collection_ids(base_kw, base_max_rating)
+            if collection_ids:
+                send(f"📦 Collection browse: *{len(collection_ids)}* candidate apps — filtering...")
+                col_fs = {"gov":0,"zero_rating":0,"rating":0,"installs":0,"no_email":0,"dup":0,"passed":0}
+                col_batch = []
+                for app_id in collection_ids:
+                    while state["status"] == "PAUSED": time.sleep(1)
+                    if state["status"] == "IDLE": return
+                    state["scraped_ids"].add(app_id)
+                    d = None
+                    for _att in range(2):
+                        try:
+                            d = gplay(app_id, lang='en', country='us'); break
+                        except:
+                            if _att == 0: time.sleep(1)
+                    if not d: continue
+                    email, esrc = get_email(d)
+                    rating   = float(d.get('score') or 0.0)
+                    raw_inst = d.get('minInstalls') or d.get('realInstalls') or 0
+                    installs = int(raw_inst) if raw_inst else 0
+                    app_dict = {
+                        "app_id":app_id,"app_name":str(d.get('title','Unknown')),
+                        "dev_name":str(d.get('developer','') or ''),
+                        "email":email,"email_source":esrc,"rating":rating,"installs":installs,
+                        "genre":str(d.get('genre','') or ''),"summary":str(d.get('summary','') or ''),
+                        "description":str(d.get('description','') or '')[:1000],
+                        "website":str(d.get('developerWebsite','') or ''),
+                        "privacy":str(d.get('privacyPolicy','') or ''),
+                        "link":str(d.get('url','') or ''),
+                        "updated":str(d.get('updated','') or ''),
+                        "keyword":"[collection_browse]",
+                    }
+                    col_batch.append(app_dict)
+                    state["total_scraped"] += 1
+                    qual, _ = is_qualified(app_dict, base_max_rating, base_max_installs,
+                                           state["seen_emails"], col_fs)
+                    if qual:
+                        if save_qualified_lead(app_dict):
+                            state["seen_emails"].add(email)
+                            state["qualified_count"] += 1
+                    if len(col_batch) >= 50:
+                        try:
+                            requests.post(SHEET_URL,
+                                json={"action":"save_raw_batch","rows":col_batch}, timeout=30)
+                            col_batch = []
+                        except: pass
+                    time.sleep(random.uniform(0.05, 0.1))
+                if col_batch:
+                    try:
+                        requests.post(SHEET_URL,
+                            json={"action":"save_raw_batch","rows":col_batch}, timeout=30)
+                    except: pass
+                send(f"✅ Collection phase done: *{state['qualified_count']}* leads so far\n"
+                     f"NoEmail:{col_fs['no_email']} HighRating:{col_fs['rating']} "
+                     f"HighInstalls:{col_fs['installs']} Dup:{col_fs['dup']}")
+            else:
+                send("ℹ️ Collection browse returned 0 — proceeding to keyword search.")
+        except Exception as col_e:
+            send(f"ℹ️ Collection browse skipped: {col_e}")
+        # ── End collection browse ─────────────────────────────────────
 
         round_num  = 0
         MAX_ROUNDS = 5
