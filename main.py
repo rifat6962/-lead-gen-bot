@@ -12,15 +12,19 @@ web_app = Flask(__name__)
 @web_app.route('/')
 def home(): return "Bot is Alive!"
 
+@web_app.route('/health')
+def health(): return "OK", 200
+
 def run_web():
-    web_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    port = int(os.environ.get("PORT", 10000))
+    web_app.run(host="0.0.0.0", port=port, use_reloader=False)
 
 # ─── CONFIG ──────────────────────────────────────────────────
-SHEET_URL = "https://script.google.com/macros/s/AKfycbzI5eCCU_Gci6M0jFr5I_Ph48CqUvvP4_nkpngWtjFafVSr_i75yqKX37ZMG4qwG0_V/exec"
-BOT_TOKEN = "8709829378:AAEJJQ8jm_oTyAcGenBrIfLi4KYHRVcSJbo"
-GROQ_KEY  = "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"
+SHEET_URL = os.environ.get("SHEET_URL", "https://script.google.com/macros/s/AKfycbzI5eCCU_Gci6M0jFr5I_Ph48CqUvvP4_nkpngWtjFafVSr_i75yqKX37ZMG4qwG0_V/exec")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8709829378:AAEJJQ8jm_oTyAcGenBrIfLi4KYHRVcSJbo")
+GROQ_KEY  = os.environ.get("GROQ_KEY",  "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")
 
-bot = telebot.TeleBot(BOT_TOKEN)
+bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 ai  = Groq(api_key=GROQ_KEY)
 
 # ─── STATE ───────────────────────────────────────────────────
@@ -53,12 +57,6 @@ AI_MODEL = "llama-3.3-70b-versatile"
 #  CORE AI CALL — retry on rate-limit, auto-disable on hard fail
 # ════════════════════════════════════════════════════════════
 def call_ai(prompt, max_tokens=2000, retries=2, silent_fallback=False):
-    """
-    silent_fallback=True  → used during email building:
-        rate limit = return None immediately (use fallback email, no waiting)
-    silent_fallback=False → used during keyword generation:
-        rate limit = wait and retry (we can afford to wait in background)
-    """
     for attempt in range(retries + 1):
         try:
             r = ai.chat.completions.create(
@@ -75,7 +73,6 @@ def call_ai(prompt, max_tokens=2000, retries=2, silent_fallback=False):
             print(f"[AI] attempt {attempt+1}: {err[:150]}")
             if "rate_limit" in err or "429" in err:
                 if silent_fallback:
-                    # Email mode: don't wait, use fallback email immediately
                     print("[AI] Rate limit during email — using fallback instantly")
                     return None
                 wait = 20 * (attempt + 1)
@@ -123,10 +120,8 @@ def send(text, md="Markdown"):
         bot.send_message(state["chat_id"], text, parse_mode=md)
     except Exception as e:
         err = str(e).lower()
-        # Markdown parse error → send as plain text
         if "can't parse" in err or "parse" in err or "entity" in err:
             try:
-                # Strip all markdown before retrying
                 plain = re.sub(r'[*_`\[\]]', '', text)
                 bot.send_message(state["chat_id"], plain)
             except Exception as e2:
@@ -255,8 +250,6 @@ def delete_schedule_time(time_str):
 
 # ════════════════════════════════════════════════════════════
 #  KEYWORD GENERATION
-#  Strategy: Proven broad terms FIRST (guaranteed results),
-#  AI as supplement. No obscure niche terms.
 # ════════════════════════════════════════════════════════════
 def parse_ai_keywords(raw_text):
     terms = []
@@ -268,12 +261,6 @@ def parse_ai_keywords(raw_text):
     return terms
 
 def generate_keywords_from_base(base):
-    """
-    Generate keywords that RELIABLY return apps on Play Store.
-    Layer 1: Base keyword alone (this ALWAYS works)
-    Layer 2: Proven broad patterns using base words
-    Layer 3: AI-generated semantically related terms (broad, no obscure brands)
-    """
     send(f"🧠 Generating keywords for '{base}'...")
     settings  = get_settings()
     kw_prompt = settings.get('keyword_prompt', '')
@@ -287,7 +274,6 @@ def generate_keywords_from_base(base):
         if 2 < len(kw) < 55 and kw not in seen:
             seen.add(kw); all_kws.append(kw)
 
-    # ── Layer 1: Base keyword variations (always work) ──────
     add(base_words)
     for w in ['app', 'free', 'best', 'top', 'new', 'simple', 'easy',
               'pro', 'safe', 'secure', 'fast', 'offline', 'lite',
@@ -300,7 +286,6 @@ def generate_keywords_from_base(base):
               'simple', 'easy to use', 'beginner', 'advanced']:
         add(f"{w} {base_words} app")
 
-    # ── Layer 2: AI generates BROAD semantically related terms ─
     prompt = (
         f'You are a Google Play Store search expert.\n'
         f'Base niche: "{base}"\n'
@@ -317,10 +302,8 @@ def generate_keywords_from_base(base):
     result = call_ai(prompt, max_tokens=2500)
     ai_terms = parse_ai_keywords(result) if result else []
 
-    # Validate AI terms — skip anything that looks like "base for [obscure thing]"
     for t in ai_terms:
         t_low = t.lower()
-        # Skip overly specific "X for Y" patterns with rare words
         if re.search(r'\bfor\s+\w+coin\b|\bfor\s+\w+chain\b', t_low):
             continue
         add(t)
@@ -329,11 +312,9 @@ def generate_keywords_from_base(base):
     return all_kws[:200] if len(all_kws) >= 200 else all_kws
 
 
-COUNTRIES = ['us', 'in', 'gb', 'au', 'ca']
 _consecutive_empty = 0
 
 def play_search_safe(query, country, n_hits=250):
-    """Single Play Store search with retry on rate limit."""
     global _consecutive_empty
     for attempt in range(3):
         try:
@@ -353,12 +334,6 @@ def play_search_safe(query, country, n_hits=250):
     return []
 
 def get_search_ids_for_keyword(kw):
-    """
-    Smart search per keyword:
-    - Short kw (1-2 words): 4 queries × 3 countries = 12 searches, ~3000 IDs
-    - Long kw (3+ words): 3 queries × 3 countries = 9 searches
-    - Cooldown after 4+ consecutive empty results
-    """
     global _consecutive_empty
 
     if _consecutive_empty >= 4:
@@ -395,9 +370,6 @@ def get_search_ids_for_keyword(kw):
 
 # ════════════════════════════════════════════════════════════
 #  FILTER
-#  Order: gov → no_email → dup → zero_rating → installs → rating
-#  Rating is STRICT: must be < max_rating (e.g. < 4.0 means 3.9 and below only).
-#  Installs auto-relax each round. Rating never relaxes.
 # ════════════════════════════════════════════════════════════
 def is_qualified(app_dict, max_rating, max_installs, seen_emails, stats):
     dev      = str(app_dict.get('dev_name','') or '').lower()
@@ -415,7 +387,6 @@ def is_qualified(app_dict, max_rating, max_installs, seen_emails, stats):
         stats["zero_rating"] += 1; return False, "zero_rating"
     if installs > max_installs:
         stats["installs"] += 1; return False, "installs"
-    # Strict rating filter: must be BELOW max_rating (e.g. <4.0 if sheet says 4.0)
     if rating >= max_rating:
         stats["rating"] += 1; return False, "rating"
     stats["passed"] += 1
@@ -430,16 +401,8 @@ def save_qualified_lead(row):
         print(f"save_qualified_lead error: {e}")
         return False
 
-
-
 # ════════════════════════════════════════════════════════════
 #  PHASE 1 — SCRAPE
-#  Guaranteed 100 leads via auto-filter-relaxation:
-#  Each round loosens filter until 100 leads reached.
-#  Round 1: Sheet settings (strict)
-#  Round 2: max_installs ×5, max_rating +0.3
-#  Round 3: max_installs ×25, max_rating +0.6
-#  Round 4+: max_installs unlimited, max_rating = 5.0 (accept all)
 # ════════════════════════════════════════════════════════════
 def phase1_scrape():
     cid = state["chat_id"]
@@ -452,26 +415,23 @@ def phase1_scrape():
     bot.send_message(cid, "🔄 Automation started.", reply_markup=kb())
 
     try:
-        state["settings"] = {}  # always fresh — never use stale cached settings
+        state["settings"] = {}
         settings         = get_settings()
         base_max_installs = int(str(settings.get('max_installs','500000')).replace(',','').strip())
         base_max_rating   = float(str(settings.get('max_rating','4.8')).strip())
         MIN_LEADS = 100
 
-        # Fresh scraped_ids each run — don't load from DB (blocks search results)
-        state["scraped_ids"]  = set()
+        state["scraped_ids"]     = set()
         state["qualified_count"] = 0
         state["total_scraped"]   = 0
         state["kw_stats"]        = {}
 
-        # Load existing qualified emails to avoid duplicates
         try:
             eq = requests.post(SHEET_URL, json={"action":"get_qualified_emails"}, timeout=20).json()
             state["seen_emails"] = set(eq) if isinstance(eq, list) else set()
         except:
             state["seen_emails"] = set()
 
-        # Get the next pending keyword set
         set_id, base_kw = get_next_keyword_set()
         if not set_id:
             send("❌ No pending keyword sets. Add via 🔑 Keywords.")
@@ -484,11 +444,9 @@ def phase1_scrape():
              f"Existing emails blocked: *{len(state['seen_emails'])}*\n"
              f"Filter auto-relaxes each round until target is reached.")
 
-        round_num = 0
-
-        # ── OUTER LOOP: each round = new keywords + relaxed installs filter ─
-        # Max 5 rounds to prevent infinite loop
+        round_num  = 0
         MAX_ROUNDS = 5
+
         while True:
             while state["status"] == "PAUSED": time.sleep(1)
             if state["status"] == "IDLE": return
@@ -499,15 +457,7 @@ def phase1_scrape():
                      f"Collected *{state['qualified_count']}* leads total. Proceeding to email phase.")
                 break
 
-            # ── Filter per round ─────────────────────────────────────────
-            # Rating is ALWAYS strict (< sheet value) — NEVER relaxed.
-            # Only installs limit gets looser each round so we can find more leads.
-            # Round 1: strict installs from sheet
-            # Round 2: installs ×10
-            # Round 3: installs ×50
-            # Round 4+: unlimited installs (only email+rating required)
-            # Max 5 rounds to prevent infinite loop.
-            cur_max_rating = base_max_rating  # always strict, e.g. < 4.0
+            cur_max_rating = base_max_rating
             if round_num == 1:
                 cur_max_installs = base_max_installs
             elif round_num == 2:
@@ -515,12 +465,11 @@ def phase1_scrape():
             elif round_num == 3:
                 cur_max_installs = base_max_installs * 50
             else:
-                cur_max_installs = 999_999_999  # unlimited installs, rating still strict
+                cur_max_installs = 999_999_999
 
             send(f"🔄 *Round {round_num}* | Filter: rating < {cur_max_rating} (strict) | "
                  f"installs ≤ {cur_max_installs:,}")
 
-            # Generate fresh keywords each round
             keywords = generate_keywords_from_base(base_kw)
             if not keywords:
                 send("❌ Keyword generation failed.")
@@ -529,7 +478,6 @@ def phase1_scrape():
             state["generated_kws"] = keywords
             state["kw_index"]      = 0
 
-            # ── INNER LOOP: process each keyword ──────────────────────────
             while state["kw_index"] < len(state["generated_kws"]):
                 while state["status"] == "PAUSED": time.sleep(1)
                 if state["status"] == "IDLE": return
@@ -599,7 +547,6 @@ def phase1_scrape():
                             state["seen_emails"].add(email)
                             state["qualified_count"] += 1
                             qualified_from_kw += 1
-                            # Notify when target first hit — but keep scraping remaining keywords
                             if state["qualified_count"] == MIN_LEADS:
                                 send(f"🎯 *{MIN_LEADS} lead target reached!* "
                                      f"Continuing to scrape remaining keywords...")
@@ -616,14 +563,12 @@ def phase1_scrape():
 
                     time.sleep(random.uniform(0.05, 0.12))
 
-                # Save remaining batch
                 if batch_raw:
                     try:
                         requests.post(SHEET_URL,
                             json={"action":"save_raw_batch","rows":batch_raw}, timeout=30)
                     except: pass
 
-                # Per-keyword summary with drop reasons
                 total_dropped = sum(fs[k] for k in fs if k != 'passed')
                 drop_info = (f"NoEmail:{fs['no_email']} HighRating:{fs['rating']} "
                              f"HighInstalls:{fs['installs']} Dup:{fs['dup']}")
@@ -632,7 +577,6 @@ def phase1_scrape():
                      f"🏆 Progress: *{state['qualified_count']}/{MIN_LEADS}* leads")
 
                 state["kw_index"] += 1
-            # ── end inner loop ─────────────────────────────────────────────
 
             if state["status"] == "IDLE": return
 
@@ -641,7 +585,6 @@ def phase1_scrape():
                      f"Total apps scraped: *{state['total_scraped']}*")
                 break
 
-            # Under target — relax installs for next round (rating stays strict always)
             still_need = MIN_LEADS - state["qualified_count"]
             if round_num == 1:   next_installs = base_max_installs * 10
             elif round_num == 2: next_installs = base_max_installs * 50
@@ -649,7 +592,6 @@ def phase1_scrape():
             send(f"⚠️ Round {round_num} done — *{state['qualified_count']}* leads | need {still_need} more.\n"
                  f"🔓 Next round: installs ≤ {next_installs:,} | rating still strictly < {base_max_rating}\n"
                  f"Starting Round {round_num+1}...")
-        # ── end outer loop ──────────────────────────────────────────────────
 
         if state["status"] == "IDLE": return
 
@@ -674,24 +616,18 @@ def phase1_scrape():
 
 
 # ════════════════════════════════════════════════════════════
-#  EMAIL SEND HELPER — detects HTML responses, Gmail limit, retries
+#  EMAIL SEND HELPER
 # ════════════════════════════════════════════════════════════
 def _is_gmail_limit(resp):
-    """Detect Gmail daily limit error from Apps Script response."""
     r = resp.lower()
     return ("too many times" in r or "service invoked" in r or
             "daily limit" in r or "quota exceeded" in r or
             "limit exceeded" in r)
 
 def _is_html_response(resp):
-    """Detect if Apps Script returned HTML instead of Success (script error)."""
     return resp.strip().startswith("<!") or "<html" in resp.lower()[:50]
 
 def _try_send_with_sender(sender, email, subject, body_html):
-    """
-    Attempt to send email via sender's Apps Script URL.
-    Returns: "success" | "gmail_limit" | "html_error" | "error:<msg>"
-    """
     try:
         r = requests.post(
             sender['url'],
@@ -707,14 +643,11 @@ def _try_send_with_sender(sender, email, subject, body_html):
     elif _is_gmail_limit(resp):
         return "gmail_limit"
     elif _is_html_response(resp):
-        # HTML = Apps Script deployment issue or Google auth redirect
-        # Treat same as gmail_limit — skip this sender
         return "html_error"
     else:
         return f"error:{resp[:80]}"
 
 def _exhaust_sender(sender_email):
-    """Mark sender as exhausted in Sheet so it won't be picked again today."""
     try:
         requests.post(SHEET_URL,
             json={"action":"increment_sender","email":sender_email,"force_exhaust":True},
@@ -722,7 +655,6 @@ def _exhaust_sender(sender_email):
     except: pass
 
 def _get_next_sender(skip_email=None):
-    """Fetch fresh sender list and return first one with quota remaining."""
     try:
         senders = requests.post(SHEET_URL, json={"action":"get_senders"}, timeout=15).json()
         for s in senders:
@@ -736,14 +668,9 @@ def _get_next_sender(skip_email=None):
         return None, []
 
 def _send_email_with_fallback(row, email_prompt, cid):
-    """
-    Send one email. Tries each available sender until success or all exhausted.
-    Returns True if sent, False if all failed/skipped.
-    """
     email = str(row.get('email',''))
     esrc  = str(row.get('email_source','dev'))
 
-    # Get initial sender
     sender, senders = _get_next_sender()
     if not sender:
         info = "⚠️ All senders hit daily limit!\n"
@@ -752,7 +679,7 @@ def _send_email_with_fallback(row, email_prompt, cid):
         send(info + "\nBot paused. Resume tomorrow.")
         state["status"] = "PAUSED"
         bot.send_message(cid, ".", reply_markup=kb())
-        return None  # None = all exhausted → stop loop
+        return None
 
     subject, body_html = build_clean_email(row, sender['email'], email_prompt)
     tried = set()
@@ -762,7 +689,6 @@ def _send_email_with_fallback(row, email_prompt, cid):
         result = _try_send_with_sender(sender, email, subject, body_html)
 
         if result == "success":
-            # Record success
             try:
                 requests.post(SHEET_URL, json={"action":"increment_sender","email":sender['email']}, timeout=15)
                 requests.post(SHEET_URL, json={"action":"mark_emailed","email":email}, timeout=15)
@@ -784,7 +710,6 @@ def _send_email_with_fallback(row, email_prompt, cid):
             reason = "Gmail daily limit" if result == "gmail_limit" else "Script deployment error"
             send(f"🔄 {sender['email']} — {reason}. Switching sender...")
             _exhaust_sender(sender['email'])
-            # Find next sender not yet tried
             sender, senders = _get_next_sender(skip_email=None)
             while sender and sender['email'] in tried:
                 tried.add(sender['email'])
@@ -801,7 +726,6 @@ def _send_email_with_fallback(row, email_prompt, cid):
                 return None
 
         else:
-            # Transient error — log and skip this email
             send(f"❌ Skip {email}: {result[6:] if result.startswith('error:') else result}")
             return False
 
@@ -809,12 +733,8 @@ def _send_email_with_fallback(row, email_prompt, cid):
 
 # ════════════════════════════════════════════════════════════
 #  STANDALONE EMAIL SENDER
-#  Triggered by "📤 Send Emails" button.
-#  Sends to all pending leads from sheet, regardless of scrape state.
-#  Uses same logic as phase2 but independent — can stop anytime.
 # ════════════════════════════════════════════════════════════
 def phase2_send_pending():
-    """Send emails to all pending qualified leads. Uses _send_email_with_fallback."""
     cid = state["chat_id"]
     if not cid: return
 
@@ -841,9 +761,9 @@ def phase2_send_pending():
             if state["status"] != "EMAILING": break
 
             result = _send_email_with_fallback(row, email_prompt, cid)
-            if result is None: break  # all senders exhausted → already paused
+            if result is None: break
 
-            if result:  # sent successfully — wait before next
+            if result:
                 wait = random.randint(60, 120)
                 send(f"⏳ Waiting {wait}s...")
                 for _ in range(wait):
@@ -863,6 +783,7 @@ def phase2_send_pending():
         send(f"❌ Send Emails Error: {e}")
         bot.send_message(cid, ".", reply_markup=kb())
 
+# ════════════════════════════════════════════════════════════
 #  PHASE 2 — EMAIL
 # ════════════════════════════════════════════════════════════
 def phase2_email_only():
@@ -889,16 +810,14 @@ def phase2_email_only():
             if state["status"] != "EMAILING": break
 
             result = _send_email_with_fallback(row, email_prompt, cid)
-            if result is None: break  # all senders exhausted
+            if result is None: break
 
-            if result:  # sent successfully — wait
+            if result:
                 wait = random.randint(60, 120)
                 send(f"⏳ Waiting {wait}s before next...")
                 for _ in range(wait):
                     if state["status"] != "EMAILING": break
                     time.sleep(1)
-
-
 
         if state["status"] == "EMAILING":
             send(f"🎉 *Email Phase Complete!* Total sent: *{state['total_emailed']}*")
@@ -921,7 +840,12 @@ def get_pending_qualified_leads():
     return []
 
 # ════════════════════════════════════════════════════════════
-#  AI EMAIL BUILDER — personalized, genre-aware
+#  AI EMAIL BUILDER
+#  Sheet এর email_prompt হলো পুরো email template/instructions।
+#  AI শুধু app-specific placeholders fill করবে।
+#  Template এ {app_name}, {dev_name}, {rating}, {genre},
+#  {personalization}, {urgency_note} placeholders থাকলে replace হবে।
+#  না থাকলে AI কে context দিয়ে সেই prompt অনুযায়ী লিখতে বলবে।
 # ════════════════════════════════════════════════════════════
 def build_clean_email(row, sender_email, email_prompt):
     app_name    = str(row.get('app_name','Unknown App'))
@@ -958,7 +882,7 @@ def build_clean_email(row, sender_email, email_prompt):
         service_angle = "Play Store ratings directly affect your app's visibility and downloads."
 
     # Personalization from website
-    website_note = ""
+    personalization = ""
     if website_url and "http" in website_url:
         try:
             resp = requests.get(website_url, timeout=5, headers={"User-Agent":"Mozilla/5.0"})
@@ -966,48 +890,69 @@ def build_clean_email(row, sender_email, email_prompt):
             text = re.sub(r'\s+',' ', text).strip()[:400]
             match = re.search(r'(\d[\d,]+\+?\s*(users?|downloads?|customers?|installs?))', text, re.I)
             if match:
-                website_note = f"Impressive — I saw you have {match.group(0)}!"
+                personalization = f"Impressive — I saw you have {match.group(0)}!"
         except: pass
 
-    if not website_note:
+    if not personalization:
         if summary and len(summary) > 15:
-            website_note = f"Your app's focus on '{summary[:60]}' caught my attention."
+            personalization = f"Your app's focus on '{summary[:60]}' caught my attention."
         elif description:
             first = description.split('.')[0].strip()
             if len(first) > 15:
-                website_note = f"I liked your approach: '{first[:70]}'."
+                personalization = f"I liked your approach: '{first[:70]}'."
         else:
-            website_note = f"I came across {app_name} on the Play Store."
+            personalization = f"I came across {app_name} on the Play Store."
 
+    # ── Check if template has placeholders — if yes, fill directly ──
+    has_placeholders = any(p in email_prompt for p in [
+        '{app_name}', '{dev_name}', '{rating}', '{genre}',
+        '{personalization}', '{urgency_note}', '{service_angle}'
+    ])
+
+    if has_placeholders:
+        # Direct fill — no AI needed
+        filled = (email_prompt
+                  .replace('{app_name}',       app_name)
+                  .replace('{dev_name}',        dev_name)
+                  .replace('{rating}',          f"{rating:.1f}")
+                  .replace('{urgency_note}',    urgency_note)
+                  .replace('{genre}',           genre)
+                  .replace('{personalization}', personalization)
+                  .replace('{service_angle}',   service_angle))
+
+        # Extract subject if present (format: SUBJECT: ...\nBODY: ...)
+        if "SUBJECT:" in filled and "BODY:" in filled:
+            try:
+                subject  = filled.split("SUBJECT:")[1].split("BODY:")[0].strip()
+                raw_body = filled.split("BODY:")[1].strip()
+            except:
+                subject  = f"Quick idea to boost {app_name}'s Play Store rating"
+                raw_body = filled
+        elif "SUBJECT:" in filled:
+            lines    = filled.split('\n', 1)
+            subject  = lines[0].replace("SUBJECT:","").strip()
+            raw_body = lines[1].strip() if len(lines) > 1 else filled
+        else:
+            subject  = f"Quick idea to boost {app_name}'s Play Store rating"
+            raw_body = filled
+
+        body_html = _wrap_body_html(raw_body, sender_email)
+        return subject, body_html
+
+    # ── No placeholders — AI writes using sheet prompt as instructions ──
     prompt = f"""{email_prompt}
 
-Write a short personalized cold outreach email to an Android app developer.
-
-App Info:
+App details to personalize with:
 - App Name: {app_name}
 - Developer: {dev_name}
 - Category: {genre}
 - Rating: {urgency_note}
-- Summary: {summary}
-- Personalization detail: {website_note}
+- Personalization: {personalization}
 - Why it matters: {service_angle}
 
-My service: I help Android developers improve Play Store ratings through genuine user review management strategies.
-
-STRICT Rules:
-1. Start EXACTLY with: Dear {dev_name},
-2. Line 2: genuine personalized compliment using the personalization detail
-3. Line 3-4: briefly mention the rating opportunity (NOT as an insult)
-4. Line 5-6: how my service helps, one concrete benefit
-5. Final line: soft CTA — invite them to reply or WhatsApp
-6. MAX 150 words
-7. ALL line breaks must use <br>
-8. Zero markdown, zero bold, zero asterisks
-9. Sign off: Abu Raihan | Play Store Review Specialist | WhatsApp: +8801902911261 | Telegram: t.me/abu_raihan69
-
-Output — ONLY this exact format, nothing else:
+Output ONLY in this exact format (no extra text):
 SUBJECT: [subject line]
-BODY: [email starting with Dear {dev_name},]"""
+BODY: [email body, use <br> for line breaks, no markdown]"""
 
     result = call_ai(prompt, max_tokens=600, silent_fallback=True)
 
@@ -1015,23 +960,33 @@ BODY: [email starting with Dear {dev_name},]"""
         try:
             subject  = result.split("SUBJECT:")[1].split("BODY:")[0].strip()
             raw_body = result.split("BODY:")[1].strip()
-            body     = raw_body.replace('**','').replace('*','').replace('##','').replace('#','').strip()
-            body_html = body.replace('\n\n','<br><br>').replace('\n','<br>')
-            unsubscribe = (f'<br><br><hr style="border:0;border-top:1px solid #eee;margin:16px 0;">'
-                           f'<p style="text-align:center;font-size:11px;color:#bbb;">'
-                           f'<a href="mailto:{sender_email}?subject=Unsubscribe&body=Remove me." '
-                           f'style="color:#bbb;">Unsubscribe</a></p>')
-            full_html = (f'<div style="font-family:Arial,sans-serif;font-size:14px;'
-                         f'line-height:1.7;color:#333;max-width:600px;margin:0 auto;">'
-                         f'{body_html}{unsubscribe}</div>')
-            return subject, full_html
+            raw_body = raw_body.replace('**','').replace('*','').replace('##','').replace('#','').strip()
+            body_html = _wrap_body_html(raw_body, sender_email)
+            return subject, body_html
         except Exception as e:
             print(f"Email parse error: {e}")
 
-    # Fallback email when AI fails
-    fallback_body = (
+    # Fallback
+    return _fallback_email(app_name, dev_name, urgency_note, service_angle,
+                           personalization, sender_email)
+
+def _wrap_body_html(raw_body, sender_email):
+    """Wrap body text in styled HTML container with unsubscribe footer."""
+    body_html   = raw_body.replace('\n\n','<br><br>').replace('\n','<br>')
+    unsubscribe = (f'<br><br><hr style="border:0;border-top:1px solid #eee;margin:16px 0;">'
+                   f'<p style="text-align:center;font-size:11px;color:#bbb;">'
+                   f'<a href="mailto:{sender_email}?subject=Unsubscribe&body=Remove me." '
+                   f'style="color:#bbb;">Unsubscribe</a></p>')
+    return (f'<div style="font-family:Arial,sans-serif;font-size:14px;'
+            f'line-height:1.7;color:#333;max-width:600px;margin:0 auto;">'
+            f'{body_html}{unsubscribe}</div>')
+
+def _fallback_email(app_name, dev_name, urgency_note, service_angle,
+                    personalization, sender_email):
+    """Static fallback when AI unavailable."""
+    body = (
         f"Dear {dev_name},<br><br>"
-        f"{website_note}<br><br>"
+        f"{personalization}<br><br>"
         f"I noticed {app_name} is {urgency_note}. {service_angle}<br><br>"
         f"I help Android app developers improve their Play Store ratings through genuine "
         f"review management. I'd love to share a quick strategy that's worked for similar apps.<br><br>"
@@ -1042,19 +997,12 @@ BODY: [email starting with Dear {dev_name},]"""
         f"WhatsApp: +8801902911261<br>"
         f"Telegram: t.me/abu_raihan69"
     )
-    subject     = f"Quick idea to boost {app_name}'s Play Store rating"
-    unsubscribe = (f'<br><br><hr style="border:0;border-top:1px solid #eee;margin:16px 0;">'
-                   f'<p style="text-align:center;font-size:11px;color:#bbb;">'
-                   f'<a href="mailto:{sender_email}?subject=Unsubscribe&body=Remove me." '
-                   f'style="color:#bbb;">Unsubscribe</a></p>')
-    full_html   = (f'<div style="font-family:Arial,sans-serif;font-size:14px;'
-                   f'line-height:1.7;color:#333;max-width:600px;margin:0 auto;">'
-                   f'{fallback_body}{unsubscribe}</div>')
-    return subject, full_html
+    subject   = f"Quick idea to boost {app_name}'s Play Store rating"
+    body_html = _wrap_body_html(body, sender_email)
+    return subject, body_html
 
 # ─── SPAM TEST ────────────────────────────────────────────────
 def run_spam_test_with_sender(test_email, sender):
-    """Send a test email — uses static template so AI failures don't block it."""
     sender_email = sender.get('email', 'your@email.com')
     subject = "Test: Can You See This? [ASO Audit]"
     body = f"""<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.7;color:#333;max-width:600px;margin:0 auto;">
@@ -1062,7 +1010,7 @@ def run_spam_test_with_sender(test_email, sender):
 <p>This is a <strong>test email</strong> from your Leadgen automation bot.</p>
 <p>If you received this, your sender <code>{sender_email}</code> is working correctly ✅</p>
 <p>Your bot is ready to send personalized cold outreach emails to app developers on Google Play Store.</p>
-<p>Each real email will be AI-personalized based on the app's name, rating, genre, and developer info.</p>
+<p>Each real email will be personalized based on the app's name, rating, genre, and developer info.</p>
 <hr style="border:none;border-top:1px solid #eee;margin:20px 0;">
 <p style="font-size:12px;color:#888;">
 Sent via Leadgen Bot | Sender: {sender_email}<br>
@@ -1081,7 +1029,7 @@ Sent via Leadgen Bot | Sender: {sender_email}<br>
             send(f"✅ *Test email sent!*\nTo: `{test_email}`\nVia: `{sender_email}`\n📌 Subject: {subject}")
         else:
             send(f"❌ *Sender returned error:* `{resp}`\n\n"
-                 f"Check:\n• Is the Apps Script URL correct?\n• Is the script deployed as \'Anyone\'?\n• Does the script have Gmail permission?")
+                 f"Check:\n• Is the Apps Script URL correct?\n• Is the script deployed as 'Anyone'?\n• Does the script have Gmail permission?")
     except requests.exceptions.Timeout:
         send(f"❌ *Timeout* — Apps Script URL took too long. Check the URL is correct.")
     except Exception as e:
@@ -1106,7 +1054,7 @@ def show_sender_selection(test_email):
         bot.send_message(state["chat_id"], ".", reply_markup=kb())
 
 # ════════════════════════════════════════════════════════════
-#  SCHEDULER
+#  SCHEDULER — runs in its own thread, never blocks polling
 # ════════════════════════════════════════════════════════════
 def run_scheduler():
     tz = pytz.timezone('Asia/Dhaka')
@@ -1158,7 +1106,7 @@ def welcome(message):
         "*📅 Schedules:* Set daily auto-start times (Dhaka timezone).\n"
         "*🔑 Keywords:* Add sets like `[crypto wallet] [travel app]` — used one by one.\n"
         "*📧 Senders:* Manage Gmail sender accounts.\n"
-        "*🧪 Spam Test:* Send a test AI-generated email.\n"
+        "*🧪 Spam Test:* Send a test email to verify sender.\n"
         "*🔄 Refresh:* Show bot status & AI health.\n\n"
         "Use the buttons below 👇",
         parse_mode="Markdown", reply_markup=kb())
@@ -1444,11 +1392,10 @@ def handle(message):
         mk.add(InlineKeyboardButton("🔙 Back",       callback_data="back"))
         bot.reply_to(message, txt, parse_mode="Markdown", reply_markup=mk)
 
-# ─── MAIN ────────────────────────────────────────────────────
-if __name__ == "__main__":
-    print("🚀 Starting Lead Gen Bot...")
-    threading.Thread(target=run_web,       daemon=True).start()
-    threading.Thread(target=run_scheduler, daemon=True).start()
+# ════════════════════════════════════════════════════════════
+#  MAIN — Render-safe: polling in own thread, Flask in main thread
+# ════════════════════════════════════════════════════════════
+def run_polling():
     while True:
         try:
             print("🤖 Polling...")
@@ -1456,3 +1403,10 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"Poll error: {e}")
             time.sleep(5)
+
+if __name__ == "__main__":
+    print("🚀 Starting Lead Gen Bot...")
+    threading.Thread(target=run_polling,    daemon=True).start()
+    threading.Thread(target=run_scheduler,  daemon=True).start()
+    # Flask runs in main thread — keeps Render's HTTP port alive, prevents sleep/block
+    run_web()
